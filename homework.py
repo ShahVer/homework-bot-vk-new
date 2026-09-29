@@ -136,7 +136,6 @@ def parse_status(homework):
 
 def main():
     """Основная логика работы бота."""
-
     check_tokens()
     vk_session = vk_api.VkApi(token=VK_TOKEN)
     vk = vk_session.get_api()
