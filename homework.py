@@ -1,22 +1,17 @@
+import http
+import logging
 import os
 import sys
 import time
-import logging
 
 from dotenv import load_dotenv
 import requests
 import vk_api
 
-from exceptions import APIResponseError
+from exceptions import APIResponseError, MissingTokenError
+
 
 load_dotenv()
-
-
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
 
 
 PRACTICUM_TOKEN = os.getenv('PRACTICUM_TOKEN')
@@ -37,31 +32,55 @@ HOMEWORK_VERDICTS = {
 
 def check_tokens():
     """Проверяет доступность переменных окружения."""
-    return all([PRACTICUM_TOKEN, VK_TOKEN, VK_USER_ID])
+    tokens = {
+        'PRACTICUM_TOKEN': PRACTICUM_TOKEN,
+        'VK_TOKEN': VK_TOKEN,
+        'VK_USER_ID': VK_USER_ID,
+    }
+    missing_tokens = [name for name, value in tokens.items() if not value]
+
+    if missing_tokens:
+        raise MissingTokenError(
+            f'Отсутствуют обязательные переменные окружения: {missing_tokens}'
+        )
 
 
 def send_message(vk, message):
     """Отправляет текстовое сообщение в заданный чат VK."""
     try:
+        logging.info('Начало отправки сообщения в VK')
         vk.messages.send(
             user_id=VK_USER_ID,
             message=message,
             random_id=0
         )
         logging.debug(f'Бот отправил сообщение: "{message}"')
-    except Exception as error:
+        return True
+    except (vk_api.exceptions.ApiError, requests.RequestException) as error:
         logging.error(f'Сбой при отправке сообщения в VK: {error}')
+        return False
+    except Exception as error:
+        logging.error(f'Непредвиденная ошибка при отправке в VK: {error}')
+        return False
 
 
 def get_api_answer(timestamp):
     """Делает запрос к API Практикума и возвращает ответ."""
-    params = {'from_date': timestamp}
+    request_params = {
+        'url': ENDPOINT,
+        'headers': HEADERS,
+        'params': {'from_date': timestamp}
+    }
     try:
-        response = requests.get(ENDPOINT, headers=HEADERS, params=params)
+        logging.info(
+            'Начало запроса к API. URL: {url}, '
+            'Headers: {headers}, Params: {params}'.format(**request_params)
+        )
+        response = requests.get(**request_params)
     except requests.RequestException as error:
         raise APIResponseError(f'Сбой при запросе к эндпоинту: {error}')
 
-    if response.status_code != 200:
+    if response.status_code != http.HTTPStatus.OK:
         raise APIResponseError(f'Код ответа API: {response.status_code}')
 
     return response.json()
@@ -70,20 +89,19 @@ def get_api_answer(timestamp):
 def check_response(response):
     """Проверяет структуру ответа от API Практикума."""
     if not isinstance(response, dict):
-        raise TypeError('Ответ API должен быть словарем')
+        raise TypeError(
+            f'Ответ API должен быть словарем, а пришел {type(response)}')
 
     if 'homeworks' not in response:
-        error_msg = 'В ответе API нет ключа homeworks'
-        logging.error(error_msg)
-        raise KeyError(error_msg)
+        raise KeyError('В ответе API нет ключа homeworks')
 
     if 'current_date' not in response:
-        error_msg = 'В ответе API нет ключа current_date'
-        logging.error(error_msg)
-        raise KeyError(error_msg)
+        logging.error('В ответе API отсутствует ключ current_date')
 
     homeworks = response['homeworks']
     if not isinstance(homeworks, list):
+        # я пыталась залогировать, но автотесты  требуют, чтобы функция
+        # check_response обязательно выбрасывала TypeError
         raise TypeError('Под ключом homeworks должен быть список')
 
     return homeworks
@@ -91,14 +109,18 @@ def check_response(response):
 
 def parse_status(homework):
     """Возвращает строку со статусом проверки домашней работы."""
+    if not isinstance(homework, dict):
+        raise TypeError('Данные домашней работы должны быть словарем')
+
+    if 'status' not in homework:
+        raise KeyError('В данных домашней работы нет ключа status')
+
     if 'homework_name' not in homework:
         raise KeyError('В данных домашней работы нет ключа homework_name')
 
-    status = homework.get('status')
+    status = homework['status']
     if status not in HOMEWORK_VERDICTS:
-        error_msg = f'Неизвестный статус домашней работы: {status}'
-        logging.error(error_msg)
-        raise ValueError(error_msg)
+        raise ValueError(f'Неизвестный статус домашней работы: {status}')
 
     homework_name = homework['homework_name']
     verdict = HOMEWORK_VERDICTS[status]
@@ -107,10 +129,11 @@ def parse_status(homework):
 
 def main():
     """Основная логика работы бота."""
-    if not check_tokens():
-        error_msg = 'Отсутствуют обязательные переменные окружения!'
-        logging.critical(error_msg)
-        sys.exit(error_msg)
+    try:
+        check_tokens()
+    except MissingTokenError as error:
+        logging.critical(error)
+        sys.exit(error)
 
     vk_session = vk_api.VkApi(token=VK_TOKEN)
     vk = vk_session.get_api()
@@ -126,13 +149,15 @@ def main():
             if homeworks:
                 homework = homeworks[0]
                 message = parse_status(homework)
-                send_message(vk, message)
+                is_sent = send_message(vk, message)
             else:
                 logging.debug('В ответе отсутствуют новые статусы.')
+                is_sent = True
 
-            timestamp = response.get('current_date', timestamp)
+            if is_sent:
+                timestamp = response.get('current_date', timestamp)
+
             last_error = ''
-            time.sleep(RETRY_PERIOD)
 
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
@@ -142,8 +167,18 @@ def main():
                 send_message(vk, message)
                 last_error = message
 
+        finally:
             time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
-    main()
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+    try:
+        main()
+    except Exception as error:
+        logging.critical(f'Фатальный сбой в работе программы: {error}')
+        sys.exit(f'Программа аварийно завершена: {error}')
