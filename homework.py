@@ -40,9 +40,13 @@ def check_tokens():
     missing_tokens = [name for name, value in tokens.items() if not value]
 
     if missing_tokens:
-        raise MissingTokenError(
-            f'Отсутствуют обязательные переменные окружения: {missing_tokens}'
+        error_msg = (
+            f'Отсутствуют обязательные переменные окружения: '
+            f'{missing_tokens}'
         )
+
+        logging.critical(error_msg)
+        raise MissingTokenError(error_msg)
 
 
 def send_message(vk, message):
@@ -100,17 +104,20 @@ def check_response(response):
 
     homeworks = response['homeworks']
     if not isinstance(homeworks, list):
-        # я пыталась залогировать, но автотесты  требуют, чтобы функция
-        # check_response обязательно выбрасывала TypeError
-        raise TypeError('Под ключом homeworks должен быть список')
-
+        raise TypeError(
+            f'Под ключом homeworks должен быть список, '
+            f'а пришел {type(homeworks)}'
+        )
     return homeworks
 
 
 def parse_status(homework):
     """Возвращает строку со статусом проверки домашней работы."""
     if not isinstance(homework, dict):
-        raise TypeError('Данные домашней работы должны быть словарем')
+        raise TypeError(
+            'Данные домашней работы должны быть словарем, '
+            f'а пришел {type(homework)}'
+        )
 
     if 'status' not in homework:
         raise KeyError('В данных домашней работы нет ключа status')
@@ -129,12 +136,8 @@ def parse_status(homework):
 
 def main():
     """Основная логика работы бота."""
-    try:
-        check_tokens()
-    except MissingTokenError as error:
-        logging.critical(error)
-        sys.exit(error)
 
+    check_tokens()
     vk_session = vk_api.VkApi(token=VK_TOKEN)
     vk = vk_session.get_api()
     timestamp = int(time.time())
